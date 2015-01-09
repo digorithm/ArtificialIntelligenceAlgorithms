@@ -1,8 +1,4 @@
 import javax.swing.JFrame;
-
-// This program uses JMathPlot, a package for producing Matlab-style graphs
-//   Get it at http://code.google.com/p/jmathplot/
-//   or just delete the blocks of code that use it.
 import org.math.plot.*;
 
 public class GradientDescent{
@@ -18,7 +14,7 @@ public class GradientDescent{
     int dispiter = 100;   // interval for displaying results during iterations
     int iters = 0;
 
-    // keep track of results
+    //track of results
     double[] theta0plot = new double[maxiter+1];
     double[] theta1plot = new double[maxiter+1];
     double[] tplot = new double[maxiter+1];
