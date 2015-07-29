@@ -4,12 +4,11 @@ from random import choice
 import matplotlib.pyplot as plt
 
 """
-This is single unit perceptron that learns simple booleran functions
+This is single unit perceptron that learns simple boolean functions
 """
 
 class Perceptron():
     
-
     """
     this is the thereshold to activate the unit 
     """
