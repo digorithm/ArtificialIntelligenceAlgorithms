@@ -1,0 +1,5 @@
+include setup.cfg .coveragerc tox.ini
+include TODO LICENSE.txt README.rst
+recursive-include tools *.py *.R
+recursive-include doc *
+prune doc/_build

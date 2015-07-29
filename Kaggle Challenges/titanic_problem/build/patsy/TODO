@@ -1,0 +1,292 @@
+* Add missing data handling to the just-pass-in-a-matrix bit of the high-level API
+
+* Add parallel array handling to build_design_matrices
+
+* Add parallel array handling of some sort to high-level API...
+
+* Refactor build so that there are two stages
+- first stage takes a set of factor evaluators, and returns a set of
+  evaluated columns
+- second stage handles interactions and categorical coding and assembles
+  these together into design matrices
+use case: any model where you actually want to get categorical data
+out (like multinomial regression with a factor on the LHS, or CART
+with factors on the right-hand side)
+** first stage should also handle other "parallel" data, like weights, which need to participate in the missingness calculations
+** possibly also support a "subset=" argument at this stage
+** and for parallel vectors and subset=, allow a string as a value, and if seen then evaluate it as python code in the same context as formula data (like R's subset=(MyCol > 10))
+** And do NaN/mask/missing data handling at this stage
+*** Imputation?
+*** numpy.ma
+
+* Better NaN/masks/missing data handling in transforms. I think the
+current ones will just blow up if there are any NaNs. (The previous
+entry is about handling the term "x" where x has NAs; this entry is
+about handling "center(x)" where x has NAs.) R's solution to this is
+that scale(x) simply unconditionally ignores NAs when computing the
+mean, regardless of the overall setting of na.action. That seems
+reasonable...
+
+* Advocacy
+Potential users?
+- statsmodels
+- PyMC has a (closed) ticket requesting such features:
+    http://code.google.com/p/pymc/issues/detail?id=162
+- nipy, though they have their own thing...
+- sklearn, which has regression (and might find it useful otherwise!)
+
+* Do something smarter with mismatched pandas indexes
+Right now we're conservative -- if you do ~ x + y and x and y don't
+have identical indexes, then that's an error. It's possible we should
+do something cleverer, though. Perhaps we should merge them somehow
+(pandas.concat(..., join="outer")?). (This of course would require
+that *all* items have indexes, though; right now you can mix plain
+ndarrays and pandas objects.)
+
+* Improve EvalFactor's stateful transform handling to follow . lookups
+right now it can only detect stateful transforms when they are called
+directly like
+  scale(x)
+but not if referenced through some module like
+  mylib.scale(x)
+In general we don't even want to try handling every possible function
+lookup syntax (see next item for a safety check for that), but we
+should allow for people to distribute non-builtin stateful
+transforms.
+
+* As a safety check for non-stateful transforms, we should always
+evaluate each formula on just the first row of data alone, and make
+sure the result matches what we got when evaluating it vectorized
+(i.e., confirm f(x[0]) == f(x)[0], where f is our transform. However,
+this is kind of tricky given that x might be pulled out of the
+environment, the 'data' dict might have arbitrary objects,
+etc. Hmm. Maybe intercept variable lookups and just munge those? This
+is easy to do if someone's passing in a structured array or dataframe
+and pulling all their data from it, or even if they use a dict with
+well-behaved columns. But the problem is when people do things like:
+
+  In [1]: logx = np.log(data["x"])
+
+  # refers to data["y"] and logx together
+  In [2]: lm("y ~ logx", data)
+
+* More contrast tools
+- Some sort of symbolic tools for user-defined contrasts -- take the
+  comparisons that people want to compute in terms of linear
+  combinations of level names, convert that to a matrix and do the
+  pinv dance? We have the linear_contrast code already, but that's for
+  describing constraints in terms of the coefficients you have -- it
+  seems like people want to be able to describe constraints in terms
+  of... I'm not sure what. Group means? The coefficients they could
+  have had if they'd fit some other model? (Presumably the
+  all-full-rank-dummy-coding-all-the-time model.) If I can ever figure
+  out what this is (it has something to do with "estimable contrasts")
+  then I'll implement it.
+- Short-hands for Type II, Type III, and "remove this term and
+  everything marginal to it" contrast tests?
+  Might need to figure out the trick that car::Anova uses to do
+  efficient Type II tests with two contrast matrices.
+- Understand how coding matters for Type-III ANOVA. The tabs I had
+  open last time I was looking at this:
+    http://goanna.cs.rmit.edu.au/~fscholer/anova.php
+    http://www.mail-archive.com/r-help@stat.math.ethz.ch/msg69781.html
+    https://stat.ethz.ch/pipermail/r-help/2007-October/143047.html
+    http://www.uni-kiel.de/psychologie/dwoll/r/ssTypes.php
+
+* A good way to support magic functions like mgcv's s().
+statsmodels wants this for things like
+  y ~ arima(2, 3)
+  y ~ garch(1, 1)
+the cheap trick way of doing it is:
+  class ArimaModelType(object):
+    __patsy_magic__ = True
+    ...
+  def arima(n, m):
+    return ArimaModelType(n, m)
+and then in the factor type sniffing code detect these things and
+separate them out from "real" factors. 
+
+* make sure that pickling works
+- And make sure that if we allow it at all, then it's sustainable!
+  i.e. we'll be able to guarantee that if people pickle a ModelDesc or
+  Design or whatever now, then they'll be able to get it back later.
+
+* Should EvalEnvironment.capture make a copy of the scope dictionaries?
+- The effect would be to prevent later changes in the enclosing scope
+  from affecting predictions. Of course, we probably don't want to
+  make a *deep* copy of the scope, so there's still no guarantees --
+  changes to mutable objects within that scope would still be
+  visible. Perhaps we *could* get away with making a deep copy of all
+  mutable objects that are accessed during the initial build,
+  though... I think we'd need to special-case and ignore any READONLY
+  ndarrays, as a safety valve for people who have a giant data-set
+  they're referring to. of course, even a deep copy isn't enough --
+  they could call an immutable function which accesses mutable state.
+- Josef points out that in long-running REPLs people often need to del
+  local variables to let memory be released, and if all their formulas
+  are going and making shallow copies of the environment then this
+  will be impossible. So making a shallow copy is probably out.
+- The other approach would be to extend the state dependency checking
+  that we already want to do (to catch undeclared stateful
+  transforms), and have it not only check that building an isolated
+  row of data gives the same result as building the full list, but
+  also that re-building that same row later at prediction time gives
+  the same result as it did in the first place.
+
+* Export information on which terms are marginal to which other ones
+Marginality only makes sense within a numeric-interaction "bucket", so
+this has to be computed in patsy.build and exported as part of
+DesignMatrixColumnInfo. Then it can be used for Type II tests.
+
+* Some way to specify the default contrast
+
+* Support for R's magic "." term
+- The "y ~ everything else" form
+- The "what I had in this other ModelDesc" form (e.g., "y ~ . - a"
+  to drop the 'a' predictor from an old model)
+  - This will require that the formula->ModelDesc have access to the
+    data or previous formula...
+
+* More stateful transforms:
+- Splines
+- 'cut': numeric->factor by quantile dichotimization
+- Orthogonal polynomials
+- 'code': takes a Categorical (or coerces to one), and optionally
+  a contrast, and and does the standard contrast-coding. And
+  possibly this should replace _CatFactorEvaluator...
+
+* Support for building sparse model matrices directly. (This should
+be pretty straightforward when it comes to exploiting the intrinsic
+sparsity of categorical factors; numeric factors that evaluate to a
+sparse matrix directly might be slightly more complicated.)
+
+* Real testing/support for formula syntax extensions
+The tricky part here is making sure we produce something useful.
+Use cases:
+- multinomial log-linear modelling
+- see below
+Prior art:
+- R package "lmer" interpets formulas like
+    y ~ x1 + x2 + (1 | foo) + (1 + x | bar)
+- The R [[http://cran.r-project.org/web/packages/Formula/vignettes/Formula.pdf][Formula]] package, which has two features:
+  - you can write multivariate responses, like y1 + y2 ~ ... (in stock
+    R, this is interpreted as addition (!)).
+  - you can write multiple "parts" on each side, separated
+    by |. Basically these are treated as a list of design matrix
+    specifications, and there are ways to pull out the first, second
+    etc. on each side.
+  - R package "plm" uses Formula to allow formulas like:
+       y ~ x1 + x2
+       y ~ x1 + x2 | x3
+       y ~ x1 + x2 | . + x3
+    where the second part specifies "instrumental variables". I can't
+    tell if the second part has an implicit intercept.
+  - R package "frontier" uses Formula in a similar way, allowing
+    formulas like
+       y ~ x1 + x2
+       y ~ x1 + x2 | x3
+    where the first form computes a "error components frontier" and the
+    latter computes an "efficiency effects frontier" (where the part
+    after the | are regresses "used to explain the efficiency levels (Z
+    variables)"). The part after the bar does have an implicit
+    intercept.
+  - package AER uses this in its "ivreg" command, which seems similar
+    to plm. An example makes clear that "y ~ . | x1 + x2" works, and
+    presumably the "." means the same thing as it would in "y ~ ." for
+    lm.
+  - package betareg does "beta regression", and a formula like "y ~
+    x1 | x2" states that "x1" should be used for the "mean submodel"
+    and "x2" should be used for the "precision submodel". Its betatree
+    function extends this further to "y ~ x1 | x2 | c1 + c2" where
+    "c1", "c2" are "partitioning variables". AFAICT this means that it
+    does basically does a CART-style tree division of the data based
+    on c1, c2, and then fits beta regression models x1 | x2 on each
+    subset.
+  - package "fdaMixed" uses formulas like
+      Y | id ~ fixed | random
+    where Y is a response variable, id is "a factor separating the
+    samples", and fixed and random are linear models for the fixed
+    and random effects. The 'id' part seems to be used to match
+    multiple samples from the same random effects group?
+  - package "growcurves" allows "y ~ fixed | random". If there is
+    no |, then there is a second argument (random.only) which is
+    consulted to determine whether the sole RHS argument is fixed or
+    random. (Maybe 'y ~ x1 + x2 + random(x3 + x3)' would be a better
+    syntax?)
+  - package "games" uses a syntax like "y ~ x1 + x2 | 0 | x3 |
+    z". There is another version with 8 entries instead of 4.
+  - package "metafor" does effect-size calculations using the syntax
+    "outcome ~ group | study" where each entry has to be a 2-level
+    factor. (And the 'weights' argument gives the actual numbers.)
+  - package "mhurdle" seems to describe a kind of multi-step process
+    via three-part formulas
+      y ~ x1 | x2 | x3
+    where "the first part describes the selection process if any, the
+    second part the regression equation, and the third part the
+    purchase infrequency process". You can fill in 0 if you want to
+    assume that some process doesn't actually apply (or leave out the
+    last one altogether).
+  - package "mlogit" uses three-part RHS formulas to specify different
+    parts of a multinomial logit model. "the first one contains the
+    alternative specific variables with generic coefficient, i.e. a
+    unique coefficient for all the alternatives; the second one
+    contains the individual specific variables for which one
+    coefficient is estimated for all the alternatives except one of
+    them ; the third one contains the alternative specific variables
+    with alternative specific coefficients...If a standard formula is
+    writen, it is assumed that there are only alternative specific
+    variables with generic coefficients."
+    The second RHS termlist has an intercept by default; for the other
+    two termlists any intercept is ignored in any case.
+  - package "polywog" does some clever polynomial basis function
+    fitting thing, and uses formulas like
+      y ~ x1 + x2 | z1 + z2
+    to mean basically the equivalent of
+      y ~ x1*x2 + z1 + z2
+    i.e., the first termlist gets a super-rich non-linear interaction
+    between all its entries, and the second is just entered linearly.
+
+* Currently we don't distinguish between ordered and unordered categorical data.
+Should that change?
+
+* how should redundancy elimination and explicit factor matrices interact?
+Example: If you do 1 + C(a, mat):C(b, mat), then currently it will
+expand that to 1 + C(a, mat) + C(a, mat):C(b, mat), which is going to
+be weird. Probably we should notice that the .contrast attribute in
+these cases does not give us the option of full- versus reduced-rank
+coding, and in redundancy.py we should note that such factors cannot
+be "expanded".
+
+* Profiling/optimization. There are lots of places where I use lazy
+quadratic algorithms (or even exponential, in the case of the
+non-redundant coding stuff). Perhaps worse is the heavy
+multiplication used unconditionally to load data into the model
+matrix. I'm pretty sure that at least most of the quadratic stuff
+doesn't matter because it's n^2 where n is something like the
+number of factors in an interaction term (and who has hundreds of
+factors interacting in one term?), but it wouldn't hurt to run some
+profiles to check. I think really what I mean is just, run timeit
+on a 10-variable interaction to make sure it isn't completely
+annoying.
+
+* Possible optimization: let a stateful transform's memorize_chunk
+function raise Stateless to indicate that actually, ha-ha, it turns
+out that it doesn't need to memorize anything after all (b/c the
+relevant data turns out to be specified explicitly in *args,
+**kwargs).
+Actually, this would be really useful for things like splines,
+which need to do expensive quantile estimation, but not if knots
+are specified.
+Another use case: C(something_that's_already_categorical,
+contrast=...). Note that this can't be detected until we do the first
+round of evaluation.
+A better interface would be memorize_needed(self, *args, **kwargs).
+I guess we could even have memorize_passes_needed, but eh...
+
+* Wacky idea: make factors into an actual stateful transform (one
+that takes a dict-like object and returns a matrix or Categorical)
+This would require:
+- adding memorize_passes support to stateful transforms
+- moving the factor memorization state inside an object (so it
+  wouldn't be factors that would be stateful transforms, factors would
+  be factories for stateful transforms)
